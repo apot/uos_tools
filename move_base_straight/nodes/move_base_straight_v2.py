@@ -196,16 +196,22 @@ class MoveBaseStraightAction(object):
                 # Rotate towards goal orientation
                 if (abs(euler[2]) > self.YAW_GOAL_TOLERANCE):
                     if (euler[2] > 0):
-                        cmd.angular.z = 0.8
+                        cmd.angular.z = 0.2
                     else:
-                        cmd.angular.z = -0.8	                
+                        cmd.angular.z = -0.2	                
                     self.cmd_vel_pub.publish(cmd)
                 else:
                     rospy.loginfo('%s: Succeeded' % self.action_name)
-                    # send command to stop                    
-                    self.cmd_vel_pub.publish(Twist())
-                    self.action_server.set_succeeded()
-                    break
+                    # send command to stop          
+		    cmd = Twist()
+		    cmd.linear.x = 0.1          
+                    for x in range(1, 4):
+		    	self.cmd_vel_pub.publish(cmd)
+                        rospy.sleep(1.0)
+		        print 'baer?'
+		    self.cmd_vel_pub.publish(Twist())
+		    self.action_server.set_succeeded()
+		    break
 
 if __name__ == '__main__':
     rospy.init_node('move_base_straight')
