@@ -59,27 +59,15 @@ class MoveBaseStraightAction(object):
         self.action_name = name
         self.tf_listener = tf.TransformListener()
         
-        # Get base laser to base footprint frame offset
-        while not rospy.is_shutdown():
-            try:
-                self.tf_listener.waitForTransform(footprint_frame, laser_frame, rospy.Time(), rospy.Duration(1.0))
-                self.LASER_BASE_OFFSET = self.tf_listener.lookupTransform(footprint_frame, laser_frame, rospy.Time())[0][0]
-                break
-            except (tf.Exception, tf.LookupException, tf.ConnectivityException) as e:
-                rospy.logwarn("MoveBaseBlind tf exception! Message: %s" % e.message)
-                rospy.sleep(0.1)
-                continue
-
         # Set up action server
         self.action_server = actionlib.SimpleActionServer(self.action_name, MoveBaseAction, execute_cb=self.execute_cb, auto_start=False)
         self.action_server.start()
         rospy.loginfo('%s: Action server up and running...' % (self.action_name))
 
-        if self.GOAL_TOPIC_NAME:
-            self.client = actionlib.SimpleActionClient('move_base_straight', MoveBaseAction)
-            self.client.wait_for_server()
-            rospy.Subscriber(self.GOAL_TOPIC_NAME, PoseStamped, self.manual_cb)
-            rospy.loginfo('%s: Manual control topic is: %s' % (self.action_name, self.GOAL_TOPIC_NAME))
+        #self.client = actionlib.SimpleActionClient('move_base_straight', MoveBaseAction)
+        #self.client.wait_for_server()
+        #rospy.Subscriber(self.GOAL_TOPIC_NAME, PoseStamped, self.manual_cb)
+        #rospy.loginfo('%s: Manual control topic is: %s' % (self.action_name, self.GOAL_TOPIC_NAME))
             
     def laser_to_base(self, distance_laser, angle_laser):
         """
@@ -116,7 +104,14 @@ class MoveBaseStraightAction(object):
             return True
         else: 
             return False
-            
+     
+    def holonomic_translation_towards_goal(self, cmd):
+        drive_speed = max(self.MAX_SPEED * speed_multiplier, self.MIN_SPEED)
+        cmd = Twist()
+        cmd.linear.x = (x_diff / dist) * drive_speed
+        cmd.linear.y = (y_diff / dist) * drive_speed
+        self.cmd_vel_pub.publish(cmd)
+       
 
     def translate_towards_goal(self, cmd):
         # Drive towards goal!
@@ -143,14 +138,25 @@ class MoveBaseStraightAction(object):
         
     def execute_cb(self, goal):
         if not self.scan:
-            rospy.logwarn('No messaged received yet on topic %s, aborting goal!' % rospy.resolve_name('base_scan'))
+            rospy.logwarn('No messages received yet on topic %s, aborting goal!' % rospy.resolve_name('base_scan'))
             self.action_server.set_aborted()
             return
+        
+        # Get base laser to base footprint frame offset
+        while not rospy.is_shutdown():
+             try:
+                 self.tf_listener.waitForTransform(footprint_frame, laser_frame, rospy.Time(), rospy.Duration(1.0))
+                 self.LASER_BASE_OFFSET = self.tf_listener.lookupTransform(footprint_frame, laser_frame, rospy.Time())[0][0]
+                 break
+             except (tf.Exception, tf.LookupException, tf.ConnectivityException) as e:
+                 rospy.logwarn("MoveBaseBlind tf exception! Message: %s" % e.message)
+                 rospy.sleep(0.1)
+                 continue
 
         # helper variables
         target_pose = goal.target_pose
         
-        # publish info to the console for the user
+        # publish info to the console
         rospy.loginfo('%s: Executing, moving to position: (%f, %f)' % (self.action_name, target_pose.pose.position.x, target_pose.pose.position.y))
 
         rate = rospy.Rate(hz = MoveBaseStraightAction.FREQ)
@@ -196,7 +202,13 @@ class MoveBaseStraightAction(object):
 
             cmd = Twist()
             # Goal not yet reached?
-            if (dist > self.GOAL_THRESHOLD & (not blocked())):   
+
+            # Translate holonomically
+            if (self.HOLONOMIC and dist > self.Goal_THRESHOLD and not blocked()):
+                holonomic_translation_towards_goal(cmd)
+
+            # Translate non-holonomically
+            elif (dist > self.GOAL_THRESHOLD and not blocked()):   
                 translate_towards_goal(cmd)
             
             # If goal distance falls below xy-tolerance:
@@ -206,10 +218,6 @@ class MoveBaseStraightAction(object):
             # Almost there.
             else:
                 rospy.loginfo('%s: Succeeded' % self.action_name)                  
-                cmd.linear.x = 0.1          
-                for x in range(0, 3):
-		    self.cmd_vel_pub.publish(cmd)
-		    rospy.sleep(0.2)
 		self.action_server.set_succeeded()
 		break
 
