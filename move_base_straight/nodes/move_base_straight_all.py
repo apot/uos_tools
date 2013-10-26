@@ -46,7 +46,7 @@ class MoveBaseStraightAction(object):
         # Is the robot holonomic?
         self.HOLONOMIC = rospy.get_param('~holonomic', False)
         
-        footprint_frame = rospy.get_param('~footprint_frame', '/base_footprint')
+        self.footprint_frame = rospy.get_param('~footprint_frame', '/base_footprint')
         
         # -------------------------------------------------------------------------
         
@@ -81,17 +81,18 @@ class MoveBaseStraightAction(object):
 
     def blocked(self):
         # Something in the way?
-
+        blocked = False
         block_reason = None
-        speed_multiplier = min(1.0, (dist - self.GOAL_THRESHOLD) / self.SLOWDOWN_RANGE) # used to reduce speed for goal/obstacle approach
+        # used to reduce speed for goal/obstacle approach
+        self.speed_multiplier = min(1.0, (self.dist - self.GOAL_THRESHOLD) / self.SLOWDOWN_RANGE)
         laser_angle = self.scan.angle_min
         for laser_distance in self.scan.ranges:
             (base_distance, base_angle) = self.laser_to_base(laser_distance, laser_angle)
-            angle_diff = abs(base_angle - target_angle)
+            angle_diff = abs(base_angle - self.target_angle)
             will_get_closer = angle_diff < (np.pi / 2.0)
             is_too_close = (base_distance < self.RANGE_MINIMUM) and (laser_distance > self.scan.range_min)
             if will_get_closer:
-                speed_multiplier = min(speed_multiplier, (base_distance - self.RANGE_MINIMUM) / self.SLOWDOWN_RANGE)
+                self.speed_multiplier = min(self.speed_multiplier, (base_distance - self.RANGE_MINIMUM) / self.SLOWDOWN_RANGE)
             if is_too_close and will_get_closer:
                 blocked = True
                 block_reason = (base_distance, base_angle, angle_diff)
@@ -105,19 +106,18 @@ class MoveBaseStraightAction(object):
         else: 
             return False
      
-    def holonomic_translation_towards_goal(self, cmd):
-        drive_speed = max(self.MAX_SPEED * speed_multiplier, self.MIN_SPEED)
+    def translate_towards_goal_holonomically(self, cmd):
+        drive_speed = max(self.MAX_SPEED * self.speed_multiplier, self.MIN_SPEED)
         cmd = Twist()
-        cmd.linear.x = (x_diff / dist) * drive_speed
-        cmd.linear.y = (y_diff / dist) * drive_speed
+        cmd.linear.x = (self.x_diff / self.dist) * drive_speed
+        cmd.linear.y = (self.y_diff / self.dist) * drive_speed
         self.cmd_vel_pub.publish(cmd)
        
 
     def translate_towards_goal(self, cmd):
         # Drive towards goal!
-        drive_speed = max(self.MAX_SPEED * speed_multiplier, self.MIN_SPEED)
-        cmd.linear.x = (x_diff / dist) * drive_speed
-        cmd.angular.z = target_angle * 0.6
+        cmd.linear.x = 0.1
+        cmd.angular.z = self.target_angle * 0.6
         self.cmd_vel_pub.publish(cmd)
         
     def rotate_in_place(self, cmd, direction):
@@ -131,6 +131,7 @@ class MoveBaseStraightAction(object):
         
     def laser_cb(self, scan):
         self.scan = scan
+        self.laser_frame = scan.header.frame_id
 
     def manual_cb(self, target_pose):
         goal = MoveBaseGoal(target_pose=target_pose)
@@ -144,14 +145,15 @@ class MoveBaseStraightAction(object):
         
         # Get base laser to base footprint frame offset
         while not rospy.is_shutdown():
-             try:
-                 self.tf_listener.waitForTransform(footprint_frame, laser_frame, rospy.Time(), rospy.Duration(1.0))
-                 self.LASER_BASE_OFFSET = self.tf_listener.lookupTransform(footprint_frame, laser_frame, rospy.Time())[0][0]
-                 break
-             except (tf.Exception, tf.LookupException, tf.ConnectivityException) as e:
-                 rospy.logwarn("MoveBaseBlind tf exception! Message: %s" % e.message)
-                 rospy.sleep(0.1)
-                 continue
+            try:
+                self.tf_listener.waitForTransform(self.footprint_frame, self.laser_frame, rospy.Time(), rospy.Duration(3.0))
+                self.LASER_BASE_OFFSET = self.tf_listener.lookupTransform(self.footprint_frame, self.laser_frame, rospy.Time())[0][0]
+                print self.LASER_BASE_OFFSET
+                break
+            except (tf.Exception) as e:
+                rospy.logwarn("MoveBaseBlind tf exception! Message!")
+                rospy.sleep(0.1)
+                continue
 
         # helper variables
         target_pose = goal.target_pose
@@ -171,10 +173,10 @@ class MoveBaseStraightAction(object):
 
                     self.tf_listener.waitForTransform('/base_footprint',
                             target_pose.header.frame_id,
-                            target_pose.header.stamp, rospy.Duration(1.0))
+                            rospy.Time.now(), rospy.Duration(4.0))
                     target_pose_transformed = self.tf_listener.transformPose('/base_footprint', target_pose)
                     break
-                except (tf.LookupException, tf.ConnectivityException) as e:
+                except (tf.Exception) as e:
                     rospy.logwarn("MoveBaseBlind tf exception! Message: %s" % e.message)
                     rospy.sleep(0.1)
                     continue
@@ -185,18 +187,19 @@ class MoveBaseStraightAction(object):
                 self.action_server.set_preempted()
                 break
 
-            x_diff = target_pose_transformed.pose.position.x
-            y_diff = target_pose_transformed.pose.position.y
-            dist = np.sqrt(x_diff ** 2 + y_diff ** 2)
+            self.x_diff = target_pose_transformed.pose.position.x
+            self.y_diff = target_pose_transformed.pose.position.y
+            self.dist = np.sqrt(self.x_diff ** 2 + self.y_diff ** 2)
 
-            euler = tf.transformations.euler_from_quaternion([target_pose_transformed.pose.orientation.x, target_pose_transformed.pose.orientation.y, target_pose_transformed.pose.orientation.z, target_pose_transformed.pose.orientation.w])
-            print euler[2]
+            euler = tf.transformations.euler_from_quaternion([target_pose_transformed.pose.orientation.x, 
+                    target_pose_transformed.pose.orientation.y, target_pose_transformed.pose.orientation.z, 
+                    target_pose_transformed.pose.orientation.w])
 
-            target_angle = np.arctan2(target_pose_transformed.pose.position.y, target_pose_transformed.pose.position.x)
+            self.target_angle = np.arctan2(target_pose_transformed.pose.position.y, target_pose_transformed.pose.position.x)
             # target_angle is 0 in the center of the laser scan
             # Can we see enough?
-            if ((target_angle - self.REQUIRED_APERTURE/2) < self.scan.angle_min or
-                (target_angle + self.REQUIRED_APERTURE/2) > self.scan.angle_max):
+            if ((self.target_angle - self.REQUIRED_APERTURE/2) < self.scan.angle_min or
+                (self.target_angle + self.REQUIRED_APERTURE/2) > self.scan.angle_max):
                 # Driving blind (maybe activate warning signals here)
                 pass
 
@@ -204,18 +207,18 @@ class MoveBaseStraightAction(object):
             # Goal not yet reached?
 
             # Translate holonomically
-            if (self.HOLONOMIC and dist > self.Goal_THRESHOLD and not blocked()):
-                holonomic_translation_towards_goal(cmd)
-
+            if (self.HOLONOMIC and self.dist > self.Goal_THRESHOLD and not self.blocked()):
+                self.translate_towards_goal_holonomically(cmd)
+            
             # Translate non-holonomically
-            elif (dist > self.GOAL_THRESHOLD and not blocked()):   
-                translate_towards_goal(cmd)
+            elif (self.dist > self.GOAL_THRESHOLD and not self.blocked()):   
+                self.translate_towards_goal(cmd)
             
-            # If goal distance falls below xy-tolerance:
+            # If goal distance falls below xy-tolerance, rotate:
             elif (abs(euler[2]) > self.YAW_GOAL_TOLERANCE):
-                rotate_in_place(cmd, euler[2])
+                self.rotate_in_place(cmd, euler[2])
             
-            # Almost there.
+            # Arrived
             else:
                 rospy.loginfo('%s: Succeeded' % self.action_name)                  
 		self.action_server.set_succeeded()
